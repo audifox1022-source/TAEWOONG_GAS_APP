@@ -66,13 +66,13 @@ def smart_read_file(uploaded_file, header_row=0, nrows=None):
 # ---------------------------------------------------------
 # 3. 핵심 로직: 사이클 감지 및 분석
 # ---------------------------------------------------------
-def analyze_cycle(daily_data, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end):
+def analyze_cycle(daily_data, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_abnormal_low):
     """
     조건:
     1. 시작: temp_start 이하
     2. 홀딩: temp_holding_min ~ temp_holding_max 구간이 duration_holding_min 이상 지속
     3. 종료: 홀딩 이후 temp_end 이하로 떨어지는 시점
-    4. 유효성: 시작 2시간 후부터 종료 시점까지 temp_start 미만으로 떨어지지 않아야 함
+    4. 유효성: (선택 사항) 시작 2시간 후부터 종료 시점까지 temp_start 미만으로 떨어지지 않아야 함
     """
     # 1. 시작점 찾기
     start_candidates = daily_data[daily_data['온도'] <= temp_start]
@@ -115,20 +115,20 @@ def analyze_cycle(daily_data, temp_start, temp_holding_min, temp_holding_max, du
     end_row = end_candidates.iloc[0]
     end_time = end_row['일시']
 
-    # 4. 사이클 시작 후 2시간 이후에 비정상적인 저온 발생 여부 확인
-    
-    # 2시간 후의 시작 시점 정의
-    check_start_time = start_time + timedelta(hours=2)
-    
-    # 체크 윈도우: 시작 2시간 후부터 종료 시간 직전까지의 데이터 추출
-    cycle_window = daily_data[(daily_data['일시'] >= check_start_time) & (daily_data['일시'] < end_time)].copy()
+    # 4. 사이클 시작 후 2시간 이후에 비정상적인 저온 발생 여부 확인 (선택적)
+    if check_abnormal_low:
+        # 2시간 후의 시작 시점 정의
+        check_start_time = start_time + timedelta(hours=2)
+        
+        # 체크 윈도우: 시작 2시간 후부터 종료 시간 직전까지의 데이터 추출
+        cycle_window = daily_data[(daily_data['일시'] >= check_start_time) & (daily_data['일시'] < end_time)].copy()
 
-    # 이 구간 내에서 시작 온도(temp_start)보다 엄격하게 낮은 온도가 있는지 확인
-    abnormal_low_temp = cycle_window[cycle_window['온도'] < temp_start]
-    
-    if not abnormal_low_temp.empty:
-        abnormal_time = abnormal_low_temp.iloc[0]['일시'].strftime('%Y-%m-%d %H:%M')
-        return None, f"사이클 시작 2시간 후 비정상적인 저온 발생 (<{temp_start}℃) at {abnormal_time}"
+        # 이 구간 내에서 시작 온도(temp_start)보다 엄격하게 낮은 온도가 있는지 확인
+        abnormal_low_temp = cycle_window[cycle_window['온도'] < temp_start]
+        
+        if not abnormal_low_temp.empty:
+            abnormal_time = abnormal_low_temp.iloc[0]['일시'].strftime('%Y-%m-%d %H:%M')
+            return None, f"사이클 시작 2시간 후 비정상적인 저온 발생 (<{temp_start}℃) at {abnormal_time}"
     
     return {
         'start_row': start_row,
@@ -148,8 +148,8 @@ def extract_furnace_id_from_filename(filename):
     return None
 
 def process_data(sensor_files, df_prod, col_p_date, col_p_weight, col_p_unit, 
-                 s_header_row, col_s_time, col_s_temp, col_s_gas, # col_s_unit 제거됨
-                 target_cost, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end):
+                 s_header_row, col_s_time, col_s_temp, col_s_gas,
+                 target_cost, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_abnormal_low): # check_abnormal_low 인자 추가
     
     # --- 생산실적 데이터 전처리 ---
     try:
@@ -239,8 +239,8 @@ def process_data(sensor_files, df_prod, col_p_date, col_p_weight, col_p_unit,
             
             if daily_window.empty: continue
             
-            # 사이클 분석 수행
-            cycle_info, msg = analyze_cycle(daily_window, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end)
+            # 사이클 분석 수행: check_abnormal_low 전달
+            cycle_info, msg = analyze_cycle(daily_window, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_abnormal_low)
             
             if cycle_info:
                 start = cycle_info['start_row']
@@ -397,7 +397,7 @@ def main():
         st.header("1. 데이터 업로드")
         
         prod_file = st.file_uploader("생산 실적 (Excel) - 가열로 ID 컬럼 필수", type=['xlsx'])
-        st.info("센서 데이터는 파일 이름에서 가열로 ID를 자동으로 인식합니다. (예: 가열로1호기_data.csv)")
+        st.info("센서 데이터는 파일 이름에서 가열로 ID를 자동으로 인식합니다. (예: 가열로X호기 또는 가열로X)")
         sensor_files = st.file_uploader("가열로 데이터 (CSV/Excel) - 파일 이름에서 ID 인식", type=['csv', 'xlsx', 'xls'], accept_multiple_files=True)
         
         st.divider()
@@ -413,7 +413,9 @@ def main():
         with col_t2:
             duration_holding_min = st.number_input("홀딩 최소 지속 시간 (Hours)", value=10.0, step=0.5)
             temp_holding_max = st.number_input("홀딩 온도 (Max)", value=1270, step=10)
-            st.write("")
+            
+            # 비정상 저온 체크 선택 옵션 추가
+            check_abnormal_low = st.checkbox("비정상 저온 체크 (시작 2시간 후 < 시작온도)", value=True)
             
         st.info(f"기준: Start < {temp_start}℃, {duration_holding_min}hr Holding ({temp_holding_min}~{temp_holding_max}℃), End < {temp_end}℃")
         
@@ -448,8 +450,8 @@ def main():
                 
                 # 키워드 기반 기본 인덱스 설정
                 col_p_date_index = get_default_index(df_p.columns, ['날짜', '일자', 'date'])
-                col_p_weight_index = get_default_index(df_p.columns, ['장입', '중량', 'weight'])
-                col_p_unit_index = get_default_index(df_p.columns, ['가열로', '호기', 'unit', 'furnace'])
+                col_p_weight_index = get_default_index(df_p.columns, ['장입', '중량', 'weight', 'kg'])
+                col_p_unit_index = get_default_index(df_p.columns, ['가열로', '호기', 'unit', 'furnace', '명'])
                 
                 # 사용자가 원하는 컬럼 이름 직접 선택
                 col_p_date = st.selectbox("📅 날짜 컬럼", df_p.columns, index=col_p_date_index, key="p_date")
@@ -462,14 +464,13 @@ def main():
                 
                 # 키워드 기반 기본 인덱스 설정
                 col_s_time_index = get_default_index(df_s.columns, ['일시', '시간', 'time'])
-                col_s_temp_index = get_default_index(df_s.columns, ['온도', 'temp'])
-                col_s_gas_index = get_default_index(df_s.columns, ['가스', '지침', 'gas'])
+                col_s_temp_index = get_default_index(df_s.columns, ['온도', 'temp', '℃'])
+                col_s_gas_index = get_default_index(df_s.columns, ['가스', '지침', 'gas', '누적지침'])
                 
                 # 사용자가 원하는 컬럼 이름 직접 선택
                 col_s_time = st.selectbox("⏰ 일시 컬럼", df_s.columns, index=col_s_time_index, key="s_time")
                 col_s_temp = st.selectbox("🔥 온도 컬럼", df_s.columns, index=col_s_temp_index, key="s_temp")
                 col_s_gas = st.selectbox("⛽ 가스지침 컬럼", df_s.columns, index=col_s_gas_index, key="s_gas")
-                # col_s_unit 제거됨
                 
         except Exception as e:
             st.error(f"데이터 미리보기에 실패했습니다. 제목행 설정을 확인하거나 파일 형식을 점검해주세요. (세부 오류: {e})")
@@ -480,11 +481,11 @@ def main():
                 # 전체 데이터 다시 읽기
                 f_prod_full = smart_read_file(prod_file, p_header)
                 
-                # process_data 호출 시 col_s_unit 인자 제거
+                # process_data 호출 시 check_abnormal_low 전달
                 res, raw, error_msg = process_data(sensor_files, f_prod_full, 
                                                    col_p_date, col_p_weight, col_p_unit, 
                                                    s_header, col_s_time, col_s_temp, col_s_gas, 
-                                                   target_cost, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end)
+                                                   target_cost, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_abnormal_low)
                 
                 if error_msg:
                      st.error(f"분석 실패: {error_msg}")
