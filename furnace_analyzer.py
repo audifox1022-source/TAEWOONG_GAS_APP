@@ -519,7 +519,8 @@ def main():
         
         col_t1, col_t2 = st.columns(2)
         with col_t1:
-            temp_start = st.number_input("시작 온도 (Max)", value=600, step=10, help="이 온도 이하일 때 사이클 시작 후보로 간주")
+            # 시작 온도 Max 값 조정 (사용자 피드백 반영)
+            temp_start = st.number_input("시작 온도 (Max)", value=700, step=10, help="이 온도 이하일 때 사이클 시작 후보로 간주 (±100°C 유연 탐색)")
             temp_holding_min = st.number_input("홀딩 온도 (Min)", value=1230, step=10)
             temp_end = st.number_input("종료 온도 (Max)", value=900, step=10)
         with col_t2:
