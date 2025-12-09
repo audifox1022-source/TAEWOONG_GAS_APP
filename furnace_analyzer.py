@@ -316,6 +316,7 @@ def process_data(prod_files, p_header, col_p_start_time, col_p_weight, col_p_uni
             charge_kg = closest_match['장입량']
             
             # 매칭 기준 검증: 매칭된 생산 실적의 시작 시각이 센서 사이클 시작 시각과 time_tolerance_hours 이내여야 함
+            # (차지 시작 시각을 알 수 없을 경우, 이 로직은 큰 의미가 없으므로 일단 매칭을 시도하고 결과를 기록)
             match_diff = closest_match['diff']
             
             if match_diff > timedelta(hours=time_tolerance_hours):
