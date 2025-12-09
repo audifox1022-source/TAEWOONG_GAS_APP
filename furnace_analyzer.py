@@ -92,7 +92,7 @@ def analyze_cycle(daily_data, temp_start, temp_holding_min, temp_holding_max, du
             if len(window) < 5: continue
             
             # 5분 동안 5도 이상 상승하는 지점을 승온 시작으로 간주
-            if (window['온도'].iloc[-1] - window['온도'].iloc[0]) >= 5: # [이전 오류 수정: window['온도가'] -> window['온도']]
+            if (window['온도'].iloc[-1] - window['온도'].iloc[0]) >= 5: 
                 # 시작 온도는 소재 장입이 완료된 후 온도가 상승하기 시작하는 시점
                 start_row = daily_data.loc[idx]
                 break
