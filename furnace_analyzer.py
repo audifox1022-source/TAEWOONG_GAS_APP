@@ -66,22 +66,50 @@ def smart_read_file(uploaded_file, header_row=0, nrows=None):
 # ---------------------------------------------------------
 # 3. 핵심 로직: 사이클 감지 및 분석
 # ---------------------------------------------------------
-def analyze_cycle(daily_data, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_abnormal_low):
+def analyze_cycle(daily_data, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_abnormal_low, check_charging_end):
     """
     조건:
-    1. 시작: temp_start 이하
+    1. 시작: temp_start 이하에서 승온이 시작되는 지점 (장입 후 승온)
     2. 홀딩: temp_holding_min ~ temp_holding_max 구간이 duration_holding_min 이상 지속
     3. 종료: 홀딩 이후 temp_end 이하로 떨어지는 시점
     4. 유효성: (선택 사항) 시작 2시간 후부터 종료 시점까지 temp_start 미만으로 떨어지지 않아야 함
     """
-    # 1. 시작점 찾기
-    start_candidates = daily_data[daily_data['온도'] <= temp_start]
-    if start_candidates.empty:
-        return None, f"시작 온도({temp_start}도 이하) 없음"
-    start_row = start_candidates.iloc[0]
+    # 1. 시작점 찾기 (장입 후 승온 시작 지점 찾기)
+    
+    start_row = None
+    
+    if check_charging_end:
+        # **장입 후 승온 로직:** temp_start 이하로 떨어진 후 다시 급격히 승온되는 지점을 시작점으로 간주
+        daily_data['temp_diff'] = daily_data['온도'].diff().fillna(0)
+        
+        # 1. temp_start 이하로 온도가 떨어진 지점 (장입 완료)
+        low_temp_indices = daily_data[daily_data['온도'] <= temp_start].index
+        
+        # 2. low_temp_indices 이후의 급격한 상승 지점 (승온 시작)
+        for idx in low_temp_indices:
+            # 다음 10분간의 평균 온도 변화율이 일정 수준 이상인지 확인 (승온 시작)
+            window = daily_data.loc[idx:idx + 10]
+            if len(window) < 5: continue
+            
+            # 5분 동안 5도 이상 상승하는 지점을 승온 시작으로 간주
+            if (window['온도'].iloc[-1] - window['온도'].iloc[0]) >= 5:
+                # 시작 온도는 소재 장입이 완료된 후 온도가 상승하기 시작하는 시점
+                start_row = daily_data.loc[idx]
+                break
+        
+        if start_row is None:
+            return None, "장입 후 유효한 승온 시작 지점 없음"
+            
+    else:
+        # 기존 로직: temp_start 이하의 첫 지점을 시작점으로 간주
+        start_candidates = daily_data[daily_data['온도'] <= temp_start]
+        if start_candidates.empty:
+            return None, f"시작 온도({temp_start}도 이하) 없음"
+        start_row = start_candidates.iloc[0]
+
     start_time = start_row['일시']
 
-    # 2. 홀딩 구간 찾기
+    # 2. 홀딩 구간 찾기 (이하 기존 로직과 동일)
     post_start_data = daily_data[daily_data['일시'] > start_time].copy()
     
     # 홀딩 조건 마킹
@@ -147,22 +175,22 @@ def extract_furnace_id_from_filename(filename):
         return match.group(0).strip().replace(' ', '')
     return None
 
-def process_data(sensor_files, df_prod, col_p_date, col_p_weight, col_p_unit, 
+def process_data(sensor_files, df_prod, col_p_start_time, col_p_weight, col_p_unit, 
                  s_header_row, col_s_time, col_s_temp, col_s_gas,
-                 target_cost, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_abnormal_low, use_target_cost): # use_target_cost 인자 추가
+                 target_cost, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_abnormal_low, use_target_cost, check_charging_end, time_tolerance_hours): # check_charging_end, time_tolerance_hours 인자 추가
     
     # --- 생산실적 데이터 전처리 ---
     try:
-        # 가열로 컬럼 추가
-        df_prod = df_prod.rename(columns={col_p_date: '일자', col_p_weight: '장입량', col_p_unit: '가열로'})
-        df_prod['일자'] = pd.to_datetime(df_prod['일자'], errors='coerce').dt.normalize() # 시간 제거
+        # col_p_date 대신 col_p_start_time 사용, 컬럼명을 '시작일시'로 변경
+        df_prod = df_prod.rename(columns={col_p_start_time: '시작일시', col_p_weight: '장입량', col_p_unit: '가열로'})
+        df_prod['시작일시'] = pd.to_datetime(df_prod['시작일시'], errors='coerce') # 시간 정보 유지
         if df_prod['장입량'].dtype == object:
             df_prod['장입량'] = df_prod['장입량'].astype(str).str.replace(',', '')
         df_prod['장입량'] = pd.to_numeric(df_prod['장입량'], errors='coerce')
-        df_prod = df_prod.dropna(subset=['일자', '장입량', '가열로']).sort_values('일자')
+        df_prod = df_prod.dropna(subset=['시작일시', '장입량', '가열로']).sort_values('시작일시')
     except Exception as e: return None, None, f"생산실적 오류: {e}"
 
-    # --- 센서 데이터 통합 및 전처리 ---
+    # --- 센서 데이터 통합 및 전처리 (이전과 동일) ---
     df_list = []
     for f in sensor_files:
         f.seek(0) # 파일 포인터 초기화
@@ -223,15 +251,18 @@ def process_data(sensor_files, df_prod, col_p_date, col_p_weight, col_p_unit,
         
         if df_prod_unit.empty: continue # 생산 실적이 없는 가열로는 분석 제외
 
-        prod_dates_unit = df_prod_unit['일자'].dt.normalize().unique()
+        # 센서 데이터 전체 기간을 2일 간격으로 순회하며 사이클 분석 시도
+        # 센서 데이터의 시작과 끝 시간을 기준으로 48시간 윈도우 생성
+        time_points = pd.date_range(start=df_sensor_unit['일시'].min().normalize(), 
+                                    end=df_sensor_unit['일시'].max().normalize() + timedelta(days=2), 
+                                    freq='D')
         
-        for date_ts in prod_dates_unit:
-            date = date_ts.date()
+        # 이미 처리된 시작 시간을 기록하여 중복 감지 방지 (센서 데이터 기준)
+        processed_start_times = set()
+
+        for date_ts in time_points:
             
-            # 해당 날짜의 생산실적 행
-            prod_row = df_prod_unit[df_prod_unit['일자'] == date_ts].iloc[0]
-            
-            # 48시간 윈도우 데이터
+            # 48시간 윈도우 데이터 (시작 600도 이하를 놓치지 않기 위해 넉넉한 윈도우)
             daily_window = df_sensor_unit[
                 (df_sensor_unit['일시'] >= date_ts - timedelta(hours=1)) & 
                 (df_sensor_unit['일시'] < date_ts + timedelta(days=2)) 
@@ -239,41 +270,91 @@ def process_data(sensor_files, df_prod, col_p_date, col_p_weight, col_p_unit,
             
             if daily_window.empty: continue
             
-            # 사이클 분석 수행: check_abnormal_low 전달
-            cycle_info, msg = analyze_cycle(daily_window, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_abnormal_low)
+            # --- 반복적인 사이클 분석 시도 ---
             
-            if cycle_info:
+            temp_data = daily_window.copy()
+            
+            while True:
+                # 사이클 분석 수행: check_abnormal_low, check_charging_end 전달
+                cycle_info, msg = analyze_cycle(temp_data, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_abnormal_low, check_charging_end)
+                
+                if not cycle_info:
+                    break # 더 이상 유효한 사이클이 없으면 종료
+
                 start = cycle_info['start_row']
                 end = cycle_info['end_row']
+                start_time_of_cycle = start['일시']
                 
-                charge_kg = prod_row['장입량']
+                # 중복 사이클 감지 방지 (이미 처리된 시간 근처의 사이클이면 건너뜀)
+                if start_time_of_cycle in processed_start_times:
+                    # 이미 처리된 사이클의 뒷부분부터 다시 탐색하도록 데이터 윈도우 조정
+                    next_start_index = temp_data[temp_data['일시'] > end['일시']].index.min()
+                    if pd.isna(next_start_index):
+                        break
+                    temp_data = temp_data.loc[next_start_index:].copy()
+                    continue
+
+                # 2. 생산 실적 매칭 (시작일시 기반 최근접 매칭)
                 
-                if charge_kg <= 0: continue
-                gas_used = end['가스지침'] - start['가스지침']
-                if gas_used <= 0: continue
+                # 센서 사이클 시작 시간과 가장 가까운 생산 실적 행을 찾기
+                prod_data_for_match = df_prod_unit.copy()
                 
-                unit = gas_used / (charge_kg / 1000) # Nm3 / ton
+                # 시작일시와 센서 사이클 시작 시간의 차이 (절대값) 계산
+                prod_data_for_match['diff'] = abs(prod_data_for_match['시작일시'] - start_time_of_cycle)
                 
-                # 목표 원단위 사용 여부에 따라 달성 여부 설정
-                if use_target_cost:
-                    is_pass = unit <= target_cost
-                    achievement = 'Pass' if is_pass else 'Fail'
+                # 차이가 가장 작은 (가장 가까운) 행을 찾음
+                closest_match = prod_data_for_match.loc[prod_data_for_match['diff'].idxmin()]
+                
+                # 매칭 기준: 매칭된 생산 실적의 시작 시점이 센서 사이클의 시작 시점과 time_tolerance_hours 이내여야 함
+                if closest_match['diff'] > timedelta(hours=time_tolerance_hours):
+                    # 매칭 실패 (너무 동떨어진 차지)
+                    match_success = False
+                    charge_kg = 0 # 장입량 0으로 설정하여 원단위 계산 제외
                 else:
-                    achievement = 'N/A' # 목표 원단위를 사용하지 않을 경우
+                    match_success = True
+                    prod_row = closest_match
+                    charge_kg = prod_row['장입량']
                 
-                results.append({
-                    '가열로': unit_id,
-                    '날짜': date.strftime('%Y-%m-%d'),
-                    '검침시작': start['일시'].strftime('%Y-%m-%d %H:%M'),
-                    '시작지침': start['가스지침'],
-                    '검침완료': end['일시'].strftime('%Y-%m-%d %H:%M'),
-                    '종료지침': end['가스지침'],
-                    '가스사용량(Nm3)': int(gas_used),
-                    '장입량(kg)': int(charge_kg),
-                    '원단위': round(unit, 2),
-                    '달성여부': achievement,
-                    '비고': f"홀딩종료: {cycle_info['holding_end'].strftime('%H:%M')}"
-                })
+                
+                # 3. 원단위 및 결과 계산
+                
+                if charge_kg <= 0:
+                    # 장입량이 없거나 매칭 실패로 0일 경우, 다음 사이클 탐색으로 이동
+                    pass
+                else:
+                    gas_used = end['가스지침'] - start['가스지침']
+                    if gas_used <= 0:
+                         pass
+                    else:
+                        unit = gas_used / (charge_kg / 1000) # Nm3 / ton
+                        
+                        # 목표 원단위 사용 여부에 따라 달성 여부 설정
+                        if use_target_cost:
+                            is_pass = unit <= target_cost
+                            achievement = 'Pass' if is_pass else 'Fail'
+                        else:
+                            achievement = 'N/A' # 목표 원단위를 사용하지 않을 경우
+                        
+                        results.append({
+                            '가열로': unit_id,
+                            '날짜': start_time_of_cycle.strftime('%Y-%m-%d'),
+                            '검침시작': start_time_of_cycle.strftime('%Y-%m-%d %H:%M'),
+                            '시작지침': start['가스지침'],
+                            '검침완료': end['일시'].strftime('%Y-%m-%d %H:%M'),
+                            '종료지침': end['가스지침'],
+                            '가스사용량(Nm3)': int(gas_used),
+                            '장입량(kg)': int(charge_kg),
+                            '원단위': round(unit, 2),
+                            '달성여부': achievement,
+                            '비고': f"홀딩종료: {cycle_info['holding_end'].strftime('%H:%M')}"
+                        })
+
+                # 다음 사이클 탐색을 위해 현재 사이클이 종료된 시간 이후의 데이터만 남김
+                processed_start_times.add(start_time_of_cycle)
+                next_start_index = temp_data[temp_data['일시'] > end['일si']].index.min()
+                if pd.isna(next_start_index):
+                    break
+                temp_data = temp_data.loc[next_start_index:].copy()
             
     # 전체 센서 데이터 반환 (필터링되지 않은 원본)
     return pd.DataFrame(results), df_sensor, None
@@ -438,8 +519,17 @@ def main():
             # 비정상 저온 체크 선택 옵션 추가
             check_abnormal_low = st.checkbox("비정상 저온 체크 (시작 2시간 후 < 시작온도)", value=True)
             
-        st.info(f"기준: Start < {temp_start}℃, {duration_holding_min}hr Holding ({temp_holding_min}~{temp_holding_max}℃), End < {temp_end}℃")
+        # 장입 후 승온 시작 로직 선택 옵션 추가
+        st.divider()
+        st.subheader("⚙️ 장입 시점 처리")
+        check_charging_end = st.checkbox("장입 후 승온 시작 지점 찾기 (저온 후 급격한 온도 상승)", value=False)
+        st.info("비활성화 시: 600°C 이하로 떨어지는 첫 시점을 시작으로 간주\n활성화 시: 600°C 이하에서 승온이 재시작되는 시점을 시작으로 간주")
         
+        # 매칭 시간 허용 범위 설정 옵션 추가
+        time_tolerance_hours = st.number_input("생산 실적 매칭 시간 허용 범위 (Hours)", value=12, min_value=1, max_value=48, step=1)
+        st.info(f"센서 사이클 시작 시각과 생산 실적의 '차지 시작 시각'이 ±{time_tolerance_hours}시간 이내일 때만 매칭됩니다.")
+
+
         st.divider()
         st.header("3. 엑셀/CSV 설정")
         # 사용자가 원하는 행을 직접 선택하는 기능 (제목행 인덱스 선택)
@@ -453,6 +543,7 @@ def main():
     
     if prod_file and sensor_files:
         st.subheader("🛠️ 데이터 컬럼 지정 (미리보기)")
+        st.warning("⚠️ **중요:** 생산 실적 데이터의 '차지 시작 시각 컬럼'은 개별 차지(작업)의 정확한 시작 시간을 포함해야 분석 정확도가 높습니다.")
         
         try:
             # 미리보기 데이터 로드 (첫 3줄)
@@ -470,12 +561,14 @@ def main():
                 st.dataframe(df_p)
                 
                 # 키워드 기반 기본 인덱스 설정
-                col_p_date_index = get_default_index(df_p.columns, ['날짜', '일자', 'date'])
+                # '가열시작일시' 또는 '일시'를 우선 찾음
+                col_p_start_time_index = get_default_index(df_p.columns, ['가열시작일시', '시작일시', '일시', 'date', '시간'])
                 col_p_weight_index = get_default_index(df_p.columns, ['장입', '중량', 'weight', 'kg'])
                 col_p_unit_index = get_default_index(df_p.columns, ['가열로', '호기', 'unit', 'furnace', '명'])
                 
                 # 사용자가 원하는 컬럼 이름 직접 선택
-                col_p_date = st.selectbox("📅 날짜 컬럼", df_p.columns, index=col_p_date_index, key="p_date")
+                # 날짜 컬럼 대신 '차지 시작 시각' 컬럼 선택으로 변경
+                col_p_start_time = st.selectbox("⏰ 차지 시작 시각 컬럼", df_p.columns, index=col_p_start_time_index, key="p_start_time")
                 col_p_weight = st.selectbox("⚖️ 장입량 컬럼", df_p.columns, index=col_p_weight_index, key="p_weight")
                 col_p_unit = st.selectbox("🏭 생산 실적의 가열로 ID 컬럼", df_p.columns, index=col_p_unit_index, key="p_unit")
                 
@@ -495,18 +588,18 @@ def main():
                 
         except Exception as e:
             st.error(f"데이터 미리보기에 실패했습니다. 제목행 설정을 확인하거나 파일 형식을 점검해주세요. (세부 오류: {e})")
-            col_p_date, col_p_weight, col_p_unit, col_s_time, col_s_temp, col_s_gas = None, None, None, None, None, None
+            col_p_start_time, col_p_weight, col_p_unit, col_s_time, col_s_temp, col_s_gas = None, None, None, None, None, None
 
-        if run_btn and col_p_date: # 컬럼 선택이 완료되었을 때 실행
+        if run_btn and col_p_start_time: # 컬럼 선택이 완료되었을 때 실행
             with st.spinner("정밀 분석 중... (사이클 탐색 및 원단위 계산)"):
                 # 전체 데이터 다시 읽기
                 f_prod_full = smart_read_file(prod_file, p_header)
                 
-                # process_data 호출 시 use_target_cost, target_cost 전달
+                # process_data 호출 시 check_charging_end, time_tolerance_hours 전달
                 res, raw, error_msg = process_data(sensor_files, f_prod_full, 
-                                                   col_p_date, col_p_weight, col_p_unit, 
+                                                   col_p_start_time, col_p_weight, col_p_unit, 
                                                    s_header, col_s_time, col_s_temp, col_s_gas, 
-                                                   target_cost, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_abnormal_low, use_target_cost)
+                                                   target_cost, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_abnormal_low, use_target_cost, check_charging_end, time_tolerance_hours)
                 
                 if error_msg:
                      st.error(f"분석 실패: {error_msg}")
