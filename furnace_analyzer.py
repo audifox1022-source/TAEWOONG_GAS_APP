@@ -176,8 +176,8 @@ def extract_furnace_id_from_filename(filename):
         return match.group(0).strip().replace(' ', '')
     return None
 
-def process_data(prod_files, p_header, col_p_start_time, col_p_weight, col_p_unit, # p_header 추가
-                 s_header_row, col_s_time, col_s_temp, col_s_gas, sensor_files, # sensor_files 위치 변경
+def process_data(prod_files, p_header, col_p_start_time, col_p_weight, col_p_unit, 
+                 s_header_row, col_s_time, col_s_temp, col_s_gas, sensor_files, 
                  target_cost, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_strict_start, use_target_cost, time_tolerance_hours, temp_rise_threshold, time_window_minutes): 
     
     # --- 생산실적 데이터 통합 및 전처리 ---
