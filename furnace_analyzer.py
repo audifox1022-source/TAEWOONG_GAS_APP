@@ -149,7 +149,7 @@ def extract_furnace_id_from_filename(filename):
 
 def process_data(sensor_files, df_prod, col_p_date, col_p_weight, col_p_unit, 
                  s_header_row, col_s_time, col_s_temp, col_s_gas,
-                 target_cost, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_abnormal_low): # check_abnormal_low 인자 추가
+                 target_cost, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_abnormal_low, use_target_cost): # use_target_cost 인자 추가
     
     # --- 생산실적 데이터 전처리 ---
     try:
@@ -253,7 +253,13 @@ def process_data(sensor_files, df_prod, col_p_date, col_p_weight, col_p_unit,
                 if gas_used <= 0: continue
                 
                 unit = gas_used / (charge_kg / 1000) # Nm3 / ton
-                is_pass = unit <= target_cost
+                
+                # 목표 원단위 사용 여부에 따라 달성 여부 설정
+                if use_target_cost:
+                    is_pass = unit <= target_cost
+                    achievement = 'Pass' if is_pass else 'Fail'
+                else:
+                    achievement = 'N/A' # 목표 원단위를 사용하지 않을 경우
                 
                 results.append({
                     '가열로': unit_id,
@@ -265,7 +271,7 @@ def process_data(sensor_files, df_prod, col_p_date, col_p_weight, col_p_unit,
                     '가스사용량(Nm3)': int(gas_used),
                     '장입량(kg)': int(charge_kg),
                     '원단위': round(unit, 2),
-                    '달성여부': 'Pass' if is_pass else 'Fail',
+                    '달성여부': achievement,
                     '비고': f"홀딩종료: {cycle_info['holding_end'].strftime('%H:%M')}"
                 })
             
@@ -288,7 +294,7 @@ class PDFReport(FPDF):
         self.cell(0, 10, f"3. 가열로 {self.unit_name} 검증 DATA (개선 후)", 0, 1, 'L')
         self.ln(5)
 
-def generate_pdf(row_data, chart_path, target, unit_name): # unit_name 추가
+def generate_pdf(row_data, chart_path, target, unit_name, use_target_cost): # use_target_cost 인자 추가
     pdf = PDFReport(unit_name=unit_name) # unit_name 전달
     pdf.add_page()
     font = 'Nanum' if HAS_KOREAN_FONT else 'Arial'
@@ -330,7 +336,14 @@ def generate_pdf(row_data, chart_path, target, unit_name): # unit_name 추가
     
     pdf.ln(5)
     pdf.set_font(font, '', 10)
-    pdf.cell(0, 8, f"* 실적 원단위: {row_data['원단위']} Nm3/ton (목표 {target} 이하 달성)", 0, 1, 'R')
+    
+    # 목표 원단위 사용 여부에 따라 문구 변경
+    if use_target_cost:
+        report_footer = f"* 실적 원단위: {row_data['원단위']} Nm3/ton (목표 {target} 이하 달성)"
+    else:
+        report_footer = f"* 실적 원단위: {row_data['원단위']} Nm3/ton"
+
+    pdf.cell(0, 8, report_footer, 0, 1, 'R')
     
     return pdf
 
@@ -402,7 +415,15 @@ def main():
         
         st.divider()
         st.header("2. 분석 기준 설정")
-        target_cost = st.number_input("목표 원단위 (Nm3/ton)", value=25.53, step=0.1, format="%.2f")
+        
+        # 목표 원단위 사용 여부 체크박스 추가
+        use_target_cost = st.checkbox("목표 원단위 사용 (Pass/Fail 분석)", value=True)
+
+        if use_target_cost:
+            target_cost = st.number_input("목표 원단위 (Nm3/ton)", value=25.53, step=0.1, format="%.2f")
+        else:
+            target_cost = None
+            st.warning("목표 원단위 분석을 사용하지 않습니다. '달성여부'는 N/A로 표시됩니다.")
         
         st.subheader("🔥 사이클 정의 (온도/시간)")
         col_t1, col_t2 = st.columns(2)
@@ -481,11 +502,11 @@ def main():
                 # 전체 데이터 다시 읽기
                 f_prod_full = smart_read_file(prod_file, p_header)
                 
-                # process_data 호출 시 check_abnormal_low 전달
+                # process_data 호출 시 use_target_cost, target_cost 전달
                 res, raw, error_msg = process_data(sensor_files, f_prod_full, 
                                                    col_p_date, col_p_weight, col_p_unit, 
                                                    s_header, col_s_time, col_s_temp, col_s_gas, 
-                                                   target_cost, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_abnormal_low)
+                                                   target_cost, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_abnormal_low, use_target_cost)
                 
                 if error_msg:
                      st.error(f"분석 실패: {error_msg}")
@@ -493,13 +514,19 @@ def main():
                     st.session_state['res'] = res
                     st.session_state['raw'] = raw
                     # 분석된 가열로 ID 목록을 세션에 저장
-                    st.session_state['unit_ids'] = res['가열로'].unique().tolist() 
+                    st.session_state['unit_ids'] = res['가열로'].unique().tolist()
+                    st.session_state['use_target_cost'] = use_target_cost # 세션에 저장
+                    st.session_state['target_cost'] = target_cost # 세션에 저장
                     st.success(f"분석 완료! 총 {len(st.session_state['unit_ids'])}개 가열로에서 유효 사이클 {len(res)}건 발견.")
                 else:
                     st.error("분석 실패 (조건에 맞는 유효 사이클 없음)")
 
     if 'res' in st.session_state:
         df = st.session_state['res']
+        # 분석 시점의 설정값을 세션에서 가져옴
+        use_target_cost = st.session_state.get('use_target_cost', False)
+        target_cost = st.session_state.get('target_cost')
+        
         st.divider()
         
         # 가열로별 분석 결과를 필터링하기 위한 selectbox
@@ -514,24 +541,36 @@ def main():
         
         with t1:
             st.subheader(f"{selected_unit} 유효 사이클별 원단위 상세")
-            st.dataframe(df_filtered.style.applymap(lambda x: 'background-color:#d4edda; color:#155724' if x=='Pass' else 'background-color:#f8d7da; color:#721c24', subset=['달성여부']), use_container_width=True)
-            
+            # 목표 원단위를 사용하는 경우에만 Pass/Fail 색상 적용
+            if use_target_cost:
+                st.dataframe(df_filtered.style.applymap(lambda x: 'background-color:#d4edda; color:#155724' if x=='Pass' else 'background-color:#f8d7da; color:#721c24', subset=['달성여부']), use_container_width=True)
+            else:
+                st.dataframe(df_filtered, use_container_width=True)
+
         with t2:
             st.subheader(f"{selected_unit} 원단위 분포 및 추세 분석")
             if not df_filtered.empty:
                 avg_unit = df_filtered['원단위'].mean()
-                pass_count = (df_filtered['달성여부'] == 'Pass').sum()
-                fail_count = (df_filtered['달성여부'] == 'Fail').sum()
                 
                 col_s1, col_s2, col_s3 = st.columns(3)
-                with col_s1: st.metric("평균 원단위", f"{avg_unit:.2f} Nm3/ton", f"{avg_unit - target_cost:.2f}", delta_color="inverse")
-                with col_s2: st.metric("Pass 건수", f"{pass_count} 건")
-                with col_s3: st.metric("Fail 건수", f"{fail_count} 건")
+                if use_target_cost:
+                    pass_count = (df_filtered['달성여부'] == 'Pass').sum()
+                    fail_count = (df_filtered['달성여부'] == 'Fail').sum()
+                    with col_s1: st.metric("평균 원단위", f"{avg_unit:.2f} Nm3/ton", f"{avg_unit - target_cost:.2f}", delta_color="inverse")
+                    with col_s2: st.metric("Pass 건수", f"{pass_count} 건")
+                    with col_s3: st.metric("Fail 건수", f"{fail_count} 건")
+                else:
+                    with col_s1: st.metric("평균 원단위", f"{avg_unit:.2f} Nm3/ton")
+                    with col_s2: st.metric("총 사이클", f"{len(df_filtered)} 건")
+                    with col_s3: st.write("")
 
                 # 1. 히스토그램 (분포)
                 fig_hist, ax_hist = plt.subplots(figsize=(10, 5))
                 df_filtered['원단위'].hist(ax=ax_hist, bins=15, edgecolor='black', alpha=0.7)
-                ax_hist.axvline(target_cost, color='r', linestyle='--', linewidth=2, label=f'목표 ({target_cost:.2f})')
+                
+                if use_target_cost:
+                    ax_hist.axvline(target_cost, color='r', linestyle='--', linewidth=2, label=f'목표 ({target_cost:.2f})')
+                
                 ax_hist.axvline(avg_unit, color='g', linestyle='-', linewidth=2, label=f'평균 ({avg_unit:.2f})')
                 ax_hist.set_title(f'[{selected_unit}] 원단위 분포 히스토그램')
                 ax_hist.set_xlabel('원단위 (Nm3/ton)')
@@ -546,7 +585,10 @@ def main():
                 
                 fig_trend, ax_trend = plt.subplots(figsize=(10, 5))
                 ax_trend.plot(df_trend['날짜'], df_trend['원단위'], marker='o', linestyle='-', color='b', label='실적 원단위')
-                ax_trend.axhline(target_cost, color='r', linestyle='--', linewidth=2, label=f'목표 ({target_cost:.2f})')
+                
+                if use_target_cost:
+                    ax_trend.axhline(target_cost, color='r', linestyle='--', linewidth=2, label=f'목표 ({target_cost:.2f})')
+                
                 ax_trend.set_title(f'[{selected_unit}] 원단위 시계열 추이')
                 ax_trend.set_xlabel('날짜')
                 ax_trend.set_ylabel('원단위 (Nm3/ton)')
@@ -558,50 +600,57 @@ def main():
                  st.warning("분석할 유효 데이터가 없습니다.")
 
         with t3:
-            # 리포트는 개별 가열로만 가능
+            # 리포트 생성 조건 설정
+            can_generate_report = False
             if selected_unit == '전체':
                 st.warning("리포트는 개별 가열로를 선택했을 때만 생성이 가능합니다.")
             elif df_filtered.empty:
-                 st.warning(f"가열로 {selected_unit}의 목표 달성 데이터가 없어 리포트 생성이 불가합니다.")
-            else:
+                 st.warning(f"가열로 {selected_unit}의 분석 데이터가 없어 리포트 생성이 불가합니다.")
+            elif use_target_cost:
                 df_pass = df_filtered[df_filtered['달성여부'] == 'Pass']
                 if df_pass.empty:
-                    st.warning(f"가열로 {selected_unit}의 목표 달성 데이터가 없어 리포트 생성이 불가합니다.")
+                    st.warning(f"가열로 {selected_unit}의 목표 달성 데이터가 없어 리포트 생성이 불가합니다. (목표 원단위 사용 중)")
                 else:
-                    s_date = st.selectbox("리포트 생성 대상 날짜 선택:", df_pass['날짜'].unique(), key='report_date')
-                    
-                    row = df_pass[df_pass['날짜'] == s_date].iloc[0]
-                    
-                    # --- 차트 미리보기: 날짜 선택 시 바로 표시 ---
-                    st.subheader("▶️ 열처리 Chart 미리보기 (온도/가스 트렌드)")
-                    
-                    # plot_cycle_chart 호출하여 fig 생성 (미리보기 크기 10x5)
-                    fig_preview = plot_cycle_chart(row, st.session_state['raw'], temp_holding_min, temp_holding_max, fig_width=10, fig_height=5)
-                    st.pyplot(fig_preview)
-                    plt.close(fig_preview) # 메모리 해제
-                    
-                    # --- PDF 생성 버튼 ---
-                    if st.button("PDF 리포트 생성", key='generate_pdf_button'):
-                        with st.spinner("리포트 및 차트 생성 중..."):
-                            # PDF용 차트 (리포트용 크기 12x5)
-                            fig_pdf = plot_cycle_chart(row, st.session_state['raw'], temp_holding_min, temp_holding_max, fig_width=12, fig_height=5)
-                            
-                            # 임시 파일에 저장
-                            with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
-                                fig_pdf.savefig(tmp.name, bbox_inches='tight')
-                                img_path = tmp.name
-                            
-                            plt.close(fig_pdf)
-                            
-                            try:
-                                # unit_name을 generate_pdf로 전달
-                                pdf = generate_pdf(row, img_path, target_cost, selected_unit)
-                                pdf_bytes = pdf.output(dest='S').encode('latin-1')
-                                st.download_button("📥 다운로드", pdf_bytes, f"Report_{selected_unit}_{s_date}.pdf", "application/pdf")
-                            finally:
-                                os.remove(img_path)
-                            
-                            st.success(f"PDF 리포트가 생성되었습니다. ({s_date})")
+                    can_generate_report = True
+            else: # 목표 원단위를 사용하지 않는 경우, 모든 사이클을 리포트 대상으로 간주
+                df_pass = df_filtered.copy()
+                can_generate_report = True
+
+            if can_generate_report:
+                s_date = st.selectbox("리포트 생성 대상 날짜 선택:", df_pass['날짜'].unique(), key='report_date')
+                
+                row = df_pass[df_pass['날짜'] == s_date].iloc[0]
+                
+                # --- 차트 미리보기: 날짜 선택 시 바로 표시 ---
+                st.subheader("▶️ 열처리 Chart 미리보기 (온도/가스 트렌드)")
+                
+                # plot_cycle_chart 호출하여 fig 생성 (미리보기 크기 10x5)
+                fig_preview = plot_cycle_chart(row, st.session_state['raw'], temp_holding_min, temp_holding_max, fig_width=10, fig_height=5)
+                st.pyplot(fig_preview)
+                plt.close(fig_preview) # 메모리 해제
+                
+                # --- PDF 생성 버튼 ---
+                if st.button("PDF 리포트 생성", key='generate_pdf_button'):
+                    with st.spinner("리포트 및 차트 생성 중..."):
+                        # PDF용 차트 (리포트용 크기 12x5)
+                        fig_pdf = plot_cycle_chart(row, st.session_state['raw'], temp_holding_min, temp_holding_max, fig_width=12, fig_height=5)
+                        
+                        # 임시 파일에 저장
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+                            fig_pdf.savefig(tmp.name, bbox_inches='tight')
+                            img_path = tmp.name
+                        
+                        plt.close(fig_pdf)
+                        
+                        try:
+                            # unit_name, use_target_cost, target_cost를 generate_pdf로 전달
+                            pdf = generate_pdf(row, img_path, target_cost, selected_unit, use_target_cost)
+                            pdf_bytes = pdf.output(dest='S').encode('latin-1')
+                            st.download_button("📥 다운로드", pdf_bytes, f"Report_{selected_unit}_{s_date}.pdf", "application/pdf")
+                        finally:
+                            os.remove(img_path)
+                        
+                        st.success(f"PDF 리포트가 생성되었습니다. ({s_date})")
 
 if __name__ == "__main__":
     main()
