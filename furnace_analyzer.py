@@ -87,6 +87,7 @@ def analyze_cycle(daily_data, temp_start, temp_holding_min, temp_holding_max, du
     cycle_info = None
     best_start_temp = None
     
+    # 설정 온도보다 높은 온도부터 역순으로 시도 (가장 높은 유효 시작점을 찾기 위해)
     for current_temp_start in sorted(set(start_temp_candidates), reverse=True):
         if current_temp_start <= 200: continue # 너무 낮은 온도는 무시
         
@@ -191,20 +192,21 @@ def process_data(prod_files, p_header, col_p_start_time, col_p_weight, col_p_uni
         if df is not None:
              try:
                 # 컬럼 매핑 및 정리 (개별 파일)
-                df = df.rename(columns={col_p_start_time: '시작일시', col_p_weight: '장입량', col_p_unit: '가열로'})
+                # col_p_start_time이 None일 경우, KeyError 방지를 위해 컬럼을 임시로 None으로 설정 후 처리
+                start_col_name = col_p_start_time if col_p_start_time else '임시_시작일시'
+                
+                df = df.rename(columns={start_col_name: '시작일시', col_p_weight: '장입량', col_p_unit: '가열로'})
                 
                 if use_prod_time:
                     df['시작일시'] = pd.to_datetime(df['시작일시'], errors='coerce') 
                 else:
                     # 시작일시를 사용할 수 없으므로, 모든 행에 대해 임시 키를 부여하여 개별 차지로 인식하도록 함
-                    # 이 임시 시간은 센서 데이터 전체에서 사이클을 찾을 때 기준점 역할을 함
                     df['시작일시'] = df.index.to_series().apply(lambda x: pd.to_datetime('2000-01-01') + timedelta(days=x)) 
                 
                 if df['장입량'].dtype == object:
                     df['장입량'] = df['장입량'].astype(str).str.replace(',', '')
                 df['장입량'] = pd.to_numeric(df['장입량'], errors='coerce')
                 
-                # 시작일시를 매칭에 사용하지 않을 경우, 장입량은 매칭 키가 될 수 없으므로, 일단 모든 행을 유효한 생산 기록으로 인식
                 df = df.dropna(subset=['장입량', '가열로']).sort_values('시작일시')
                 df_prod_list.append(df)
              except Exception as e:
