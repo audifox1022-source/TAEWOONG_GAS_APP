@@ -175,15 +175,16 @@ def extract_furnace_id_from_filename(filename):
         return match.group(0).strip().replace(' ', '')
     return None
 
-def process_data(prod_files, col_p_start_time, col_p_weight, col_p_unit, # prod_files를 리스트로 받음
+def process_data(prod_files, p_header, col_p_start_time, col_p_weight, col_p_unit, # p_header 추가
                  s_header_row, col_s_time, col_s_temp, col_s_gas,
-                 target_cost, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_strict_start, use_target_cost, time_tolerance_hours): # check_charging_end, time_tolerance_hours 인자 추가
+                 target_cost, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_strict_start, use_target_cost, time_tolerance_hours): 
     
     # --- 생산실적 데이터 통합 및 전처리 ---
     df_prod_list = []
     for f in prod_files:
         f.seek(0)
-        df = smart_read_file(f, p_header)
+        # p_header 인수를 smart_read_file에 전달
+        df = smart_read_file(f, p_header) 
         if df is not None:
              try:
                 # 컬럼 매핑 및 정리 (개별 파일)
@@ -575,7 +576,7 @@ def main():
         if run_btn and col_p_start_time: # 컬럼 선택이 완료되었을 때 실행
             with st.spinner("정밀 분석 중... (사이클 탐색 및 원단위 계산)"):
                 # process_data 호출 시 prod_files 리스트 전달
-                res, raw, error_msg = process_data(prod_files, 
+                res, raw, error_msg = process_data(prod_files, p_header, # p_header 인수를 명시적으로 전달
                                                    col_p_start_time, col_p_weight, col_p_unit, 
                                                    s_header, col_s_time, col_s_temp, col_s_gas, 
                                                    target_cost, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_strict_start, use_target_cost, time_tolerance_hours)
