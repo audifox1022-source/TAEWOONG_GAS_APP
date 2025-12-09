@@ -582,7 +582,7 @@ def main():
                 # process_data 호출 시 prod_files 리스트 전달
                 res, raw, error_msg = process_data(prod_files, p_header, # p_header 인수를 명시적으로 전달
                                                    col_p_start_time, col_p_weight, col_p_unit, 
-                                                   s_header, col_s_time, col_s_temp, col_s_gas, 
+                                                   s_header, col_s_time, col_s_temp, col_s_gas, sensor_files, # sensor_files 인수의 위치를 수정
                                                    target_cost, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_strict_start, use_target_cost, time_tolerance_hours, temp_rise_threshold, time_window_minutes)
                 
                 if error_msg:
