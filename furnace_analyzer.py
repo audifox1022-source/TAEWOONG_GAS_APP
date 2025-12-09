@@ -66,7 +66,7 @@ def smart_read_file(uploaded_file, header_row=0, nrows=None):
 # ---------------------------------------------------------
 # 3. 핵심 로직: 사이클 감지 및 분석
 # ---------------------------------------------------------
-def analyze_cycle(daily_data, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_abnormal_low, check_charging_end):
+def analyze_cycle(daily_data, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_strict_start):
     """
     조건:
     1. 시작: temp_start 이하에서 승온이 시작되는 지점 (장입 후 승온)
@@ -74,11 +74,11 @@ def analyze_cycle(daily_data, temp_start, temp_holding_min, temp_holding_max, du
     3. 종료: 홀딩 이후 temp_end 이하로 떨어지는 시점
     4. 유효성: (선택 사항) 시작 2시간 후부터 종료 시점까지 temp_start 미만으로 떨어지지 않아야 함
     """
-    # 1. 시작점 찾기 (장입 후 승온 시작 지점 찾기)
+    # 1. 시작점 찾기 
     
     start_row = None
     
-    if check_charging_end:
+    if check_strict_start:
         # **장입 후 승온 로직:** temp_start 이하로 떨어진 후 다시 급격히 승온되는 지점을 시작점으로 간주
         daily_data['temp_diff'] = daily_data['온도'].diff().fillna(0)
         
@@ -92,7 +92,7 @@ def analyze_cycle(daily_data, temp_start, temp_holding_min, temp_holding_max, du
             if len(window) < 5: continue
             
             # 5분 동안 5도 이상 상승하는 지점을 승온 시작으로 간주
-            if (window['온도'].iloc[-1] - window['온도'].iloc[0]) >= 5:
+            if (window['온도'].iloc[-1] - window['온도가'].iloc[0]) >= 5:
                 # 시작 온도는 소재 장입이 완료된 후 온도가 상승하기 시작하는 시점
                 start_row = daily_data.loc[idx]
                 break
@@ -143,8 +143,8 @@ def analyze_cycle(daily_data, temp_start, temp_holding_min, temp_holding_max, du
     end_row = end_candidates.iloc[0]
     end_time = end_row['일시']
 
-    # 4. 사이클 시작 후 2시간 이후에 비정상적인 저온 발생 여부 확인 (선택적)
-    if check_abnormal_low:
+    # 4. 사이클 시작 후 2시간 이후에 비정상적인 저온 발생 여부 확인 (check_strict_start가 True일 때만 실행)
+    if check_strict_start:
         # 2시간 후의 시작 시점 정의
         check_start_time = start_time + timedelta(hours=2)
         
@@ -177,7 +177,7 @@ def extract_furnace_id_from_filename(filename):
 
 def process_data(sensor_files, df_prod, col_p_start_time, col_p_weight, col_p_unit, 
                  s_header_row, col_s_time, col_s_temp, col_s_gas,
-                 target_cost, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_abnormal_low, use_target_cost, check_charging_end, time_tolerance_hours): # check_charging_end, time_tolerance_hours 인자 추가
+                 target_cost, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_strict_start, use_target_cost, time_tolerance_hours): # check_charging_end, time_tolerance_hours 인자 추가
     
     # --- 생산실적 데이터 전처리 ---
     try:
@@ -274,7 +274,7 @@ def process_data(sensor_files, df_prod, col_p_start_time, col_p_weight, col_p_un
             temp_data = daily_window.copy()
             
             # 사이클 분석 수행 (첫 번째 유효 사이클만 찾음)
-            cycle_info, msg = analyze_cycle(temp_data, temp_start, temp_holding_min, temp_holding_max, duration_min_td, temp_end, check_abnormal_low, check_charging_end)
+            cycle_info, msg = analyze_cycle(temp_data, temp_start, temp_holding_min, temp_holding_max, duration_min_td, temp_end, check_strict_start, check_strict_start) # check_charging_end와 check_abnormal_low를 check_strict_start 하나로 통합
             
             if not cycle_info:
                 continue # 유효 사이클 없음
@@ -472,27 +472,27 @@ def main():
             target_cost = None
             st.warning("목표 원단위 분석을 사용하지 않습니다. '달성여부'는 N/A로 표시됩니다.")
         
-        st.subheader("🔥 사이클 정의 (온도/시간)")
+        # --- 사이클 정의 간소화 ---
+        st.divider()
+        st.header("🔥 사이클 정의 (최소 조건)")
+        
         col_t1, col_t2 = st.columns(2)
         with col_t1:
-            temp_start = st.number_input("시작 온도 (Max)", value=600, step=10)
+            temp_start = st.number_input("시작 온도 (Max)", value=600, step=10, help="이 온도 이하일 때 사이클 시작 후보로 간주")
             temp_holding_min = st.number_input("홀딩 온도 (Min)", value=1230, step=10)
             temp_end = st.number_input("종료 온도 (Max)", value=900, step=10)
         with col_t2:
-            duration_holding_min = st.number_input("홀딩 최소 지속 시간 (Hours)", value=10.0, step=0.5)
+            duration_holding_min = st.number_input("홀딩 최소 지속 시간 (Hours)", value=10.0, step=0.5, help="이 시간 이상 홀딩되어야 유효한 사이클로 간주")
             temp_holding_max = st.number_input("홀딩 온도 (Max)", value=1270, step=10)
+            st.write("") # 공간 맞추기
             
-            # 비정상 저온 체크 선택 옵션 추가
-            check_abnormal_low = st.checkbox("비정상 저온 체크 (시작 2시간 후 < 시작온도)", value=True)
-            
-        # 장입 후 승온 시작 로직 선택 옵션 추가
+        # 장입 및 저온 체크 통합 (간소화)
         st.divider()
-        st.subheader("⚙️ 장입 시점 처리")
-        check_charging_end = st.checkbox("장입 후 승온 시작 지점 찾기 (저온 후 급격한 온도 상승)", value=False)
-        st.info("비활성화 시: 600°C 이하로 떨어지는 첫 시점을 시작으로 간주\n활성화 시: 600°C 이하에서 승온이 재시작되는 시점을 시작으로 간주")
+        st.subheader("⚙️ 고급 시작/종료 조건")
+        check_strict_start = st.checkbox("정밀 시작/저온 체크 사용 (권장)", value=False, help="활성화 시: 1) 저온 후 승온 재시작 시점을 시작으로 포착 2) 시작 2시간 후 저온 복귀 시 사이클 제외")
         
-        # 매칭 시간 허용 범위 설정 옵션 추가
-        time_tolerance_hours = st.number_input("생산 실적 매칭 시간 허용 범위 (Hours)", value=12, min_value=1, max_value=48, step=1)
+        # 매칭 시간 허용 범위 설정 옵션 (기본값 12h -> 24h로 변경)
+        time_tolerance_hours = st.number_input("생산 실적 매칭 시간 허용 범위 (Hours)", value=24, min_value=1, max_value=48, step=1)
         st.info(f"센서 사이클 시작 시각과 생산 실적의 '차지 시작 시각'이 ±{time_tolerance_hours}시간 이내일 때만 매칭됩니다.")
 
 
@@ -561,11 +561,11 @@ def main():
                 # 전체 데이터 다시 읽기
                 f_prod_full = smart_read_file(prod_file, p_header)
                 
-                # process_data 호출 시 check_charging_end, time_tolerance_hours 전달
+                # process_data 호출 시 check_strict_start 전달 (check_abnormal_low, check_charging_end 대신)
                 res, raw, error_msg = process_data(sensor_files, f_prod_full, 
                                                    col_p_start_time, col_p_weight, col_p_unit, 
                                                    s_header, col_s_time, col_s_temp, col_s_gas, 
-                                                   target_cost, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_abnormal_low, use_target_cost, check_charging_end, time_tolerance_hours)
+                                                   target_cost, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_strict_start, use_target_cost, time_tolerance_hours)
                 
                 if error_msg:
                      st.error(f"분석 실패: {error_msg}")
