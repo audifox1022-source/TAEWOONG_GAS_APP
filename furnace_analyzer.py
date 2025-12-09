@@ -175,21 +175,33 @@ def extract_furnace_id_from_filename(filename):
         return match.group(0).strip().replace(' ', '')
     return None
 
-def process_data(sensor_files, df_prod, col_p_start_time, col_p_weight, col_p_unit, 
+def process_data(prod_files, col_p_start_time, col_p_weight, col_p_unit, # prod_files를 리스트로 받음
                  s_header_row, col_s_time, col_s_temp, col_s_gas,
                  target_cost, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_strict_start, use_target_cost, time_tolerance_hours): # check_charging_end, time_tolerance_hours 인자 추가
     
-    # --- 생산실적 데이터 전처리 ---
-    try:
-        # col_p_date 대신 col_p_start_time 사용, 컬럼명을 '시작일시'로 변경
-        df_prod = df_prod.rename(columns={col_p_start_time: '시작일시', col_p_weight: '장입량', col_p_unit: '가열로'})
-        df_prod['시작일시'] = pd.to_datetime(df_prod['시작일시'], errors='coerce') # 시간 정보 유지
-        if df_prod['장입량'].dtype == object:
-            df_prod['장입량'] = df_prod['장입량'].astype(str).str.replace(',', '')
-        df_prod['장입량'] = pd.to_numeric(df_prod['장입량'], errors='coerce')
-        df_prod = df_prod.dropna(subset=['시작일시', '장입량', '가열로']).sort_values('시작일시')
-    except Exception as e: return None, None, f"생산실적 오류: {e}"
+    # --- 생산실적 데이터 통합 및 전처리 ---
+    df_prod_list = []
+    for f in prod_files:
+        f.seek(0)
+        df = smart_read_file(f, p_header)
+        if df is not None:
+             try:
+                # 컬럼 매핑 및 정리 (개별 파일)
+                df = df.rename(columns={col_p_start_time: '시작일시', col_p_weight: '장입량', col_p_unit: '가열로'})
+                df['시작일시'] = pd.to_datetime(df['시작일시'], errors='coerce') 
+                if df['장입량'].dtype == object:
+                    df['장입량'] = df['장입량'].astype(str).str.replace(',', '')
+                df['장입량'] = pd.to_numeric(df['장입량'], errors='coerce')
+                df = df.dropna(subset=['시작일시', '장입량', '가열로']).sort_values('시작일시')
+                df_prod_list.append(df)
+             except Exception as e:
+                 st.error(f"생산 실적 파일 처리 오류 ({f.name}): {e}")
+                 return None, None, f"생산 실적 파일 처리 오류: {e}"
 
+    if not df_prod_list: return None, None, "유효한 생산 실적 데이터 없음"
+    
+    df_prod = pd.concat(df_prod_list, ignore_index=True)
+    
     # --- 센서 데이터 통합 및 전처리 (이전과 동일) ---
     df_list = []
     for f in sensor_files:
@@ -456,7 +468,8 @@ def main():
     with st.sidebar:
         st.header("1. 데이터 업로드")
         
-        prod_file = st.file_uploader("생산 실적 (Excel) - 가열로 ID 컬럼 필수", type=['xlsx'])
+        # prod_file을 list로 받도록 수정
+        prod_files = st.file_uploader("생산 실적 (Excel) - 가열로 ID 컬럼 필수", type=['xlsx'], accept_multiple_files=True)
         st.info("센서 데이터는 파일 이름에서 가열로 ID를 자동으로 인식합니다. (예: 가열로X호기 또는 가열로X)")
         sensor_files = st.file_uploader("가열로 데이터 (CSV/Excel) - 파일 이름에서 ID 인식", type=['csv', 'xlsx', 'xls'], accept_multiple_files=True)
         
@@ -507,14 +520,15 @@ def main():
     # 가열로 이름을 제목에 반영 (분석 전에는 일반적인 제목 사용)
     st.title(f"🏭 가열로 다중 분석 시스템 (최대 20개)")
     
-    if prod_file and sensor_files:
+    # prod_files가 리스트이므로, 체크와 미리보기를 첫 번째 파일 기준으로 수행
+    if prod_files and sensor_files:
         st.subheader("🛠️ 데이터 컬럼 지정 (미리보기)")
         st.warning("⚠️ **중요:** 생산 실적 데이터의 '차지 시작 시각 컬럼'은 개별 차지(작업)의 정확한 시작 시간을 포함해야 분석 정확도가 높습니다.")
         
         try:
-            # 미리보기 데이터 로드 (첫 3줄)
-            df_p = smart_read_file(prod_file, p_header, 3)
-            prod_file.seek(0) # 파일 포인터 초기화
+            # 미리보기 데이터 로드 (첫 3줄) - 첫 번째 생산실적 파일 사용
+            df_p = smart_read_file(prod_files[0], p_header, 3)
+            prod_files[0].seek(0) # 파일 포인터 초기화
             
             f = sensor_files[0]; f.seek(0)
             df_s = smart_read_file(f, s_header, 3)
@@ -560,11 +574,8 @@ def main():
 
         if run_btn and col_p_start_time: # 컬럼 선택이 완료되었을 때 실행
             with st.spinner("정밀 분석 중... (사이클 탐색 및 원단위 계산)"):
-                # 전체 데이터 다시 읽기
-                f_prod_full = smart_read_file(prod_file, p_header)
-                
-                # process_data 호출 시 check_strict_start 전달 (check_abnormal_low, check_charging_end 대신)
-                res, raw, error_msg = process_data(sensor_files, f_prod_full, 
+                # process_data 호출 시 prod_files 리스트 전달
+                res, raw, error_msg = process_data(prod_files, 
                                                    col_p_start_time, col_p_weight, col_p_unit, 
                                                    s_header, col_s_time, col_s_temp, col_s_gas, 
                                                    target_cost, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_strict_start, use_target_cost, time_tolerance_hours)
