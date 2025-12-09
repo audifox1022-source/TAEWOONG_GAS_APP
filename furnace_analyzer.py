@@ -66,7 +66,7 @@ def smart_read_file(uploaded_file, header_row=0, nrows=None):
 # ---------------------------------------------------------
 # 3. 핵심 로직: 사이클 감지 및 분석
 # ---------------------------------------------------------
-def analyze_cycle(daily_data, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_strict_start):
+def analyze_cycle(daily_data, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_strict_start, temp_rise_threshold, time_window_minutes):
     """
     조건:
     1. 시작: temp_start 이하에서 승온이 시작되는 지점 (장입 후 승온)
@@ -78,6 +78,7 @@ def analyze_cycle(daily_data, temp_start, temp_holding_min, temp_holding_max, du
     
     start_row = None
     duration_min_td = timedelta(hours=duration_holding_min)
+    time_window_size = int(time_window_minutes) # 분 단위
     
     if check_strict_start:
         # **장입 후 승온 로직:** temp_start 이하로 떨어진 후 다시 급격히 승온되는 지점을 시작점으로 간주
@@ -88,12 +89,12 @@ def analyze_cycle(daily_data, temp_start, temp_holding_min, temp_holding_max, du
         
         # 2. low_temp_indices 이후의 급격한 상승 지점 (승온 시작)
         for idx in low_temp_indices:
-            # 다음 10분간의 평균 온도 변화율이 일정 수준 이상인지 확인 (승온 시작)
-            window = daily_data.loc[idx:idx + 10]
-            if len(window) < 5: continue
+            # 다음 시간 윈도우 동안의 온도 변화율이 일정 수준 이상인지 확인 (승온 시작)
+            window = daily_data.loc[idx:idx + time_window_size]
+            if len(window) < 5: continue # 최소 5개 이상의 데이터 포인트가 있어야 함
             
-            # 5분 동안 5도 이상 상승하는 지점을 승온 시작으로 간주
-            if (window['온도'].iloc[-1] - window['온도'].iloc[0]) >= 5: 
+            # 윈도우 시작 대비 끝의 온도 상승이 임계값 이상인지 확인
+            if (window['온도'].iloc[-1] - window['온도'].iloc[0]) >= temp_rise_threshold: 
                 # 시작 온도는 소재 장입이 완료된 후 온도가 상승하기 시작하는 시점
                 start_row = daily_data.loc[idx]
                 break
@@ -177,7 +178,7 @@ def extract_furnace_id_from_filename(filename):
 
 def process_data(prod_files, p_header, col_p_start_time, col_p_weight, col_p_unit, # p_header 추가
                  s_header_row, col_s_time, col_s_temp, col_s_gas,
-                 target_cost, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_strict_start, use_target_cost, time_tolerance_hours): 
+                 target_cost, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_strict_start, use_target_cost, time_tolerance_hours, temp_rise_threshold, time_window_minutes): 
     
     # --- 생산실적 데이터 통합 및 전처리 ---
     df_prod_list = []
@@ -287,7 +288,7 @@ def process_data(prod_files, p_header, col_p_start_time, col_p_weight, col_p_uni
             temp_data = daily_window.copy()
             
             # 사이클 분석 수행 (첫 번째 유효 사이클만 찾음)
-            cycle_info, msg = analyze_cycle(temp_data, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_strict_start)
+            cycle_info, msg = analyze_cycle(temp_data, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_strict_start, temp_rise_threshold, time_window_minutes)
             
             if not cycle_info:
                 continue # 유효 사이클 없음
@@ -498,7 +499,10 @@ def main():
         with col_t2:
             duration_holding_min = st.number_input("홀딩 최소 지속 시간 (Hours)", value=10.0, step=0.5, help="이 시간 이상 홀딩되어야 유효한 사이클로 간주")
             temp_holding_max = st.number_input("홀딩 온도 (Max)", value=1270, step=10)
-            st.write("") # 공간 맞추기
+            
+            # 승온 감지 임계값 (패턴 분석용)
+            temp_rise_threshold = st.number_input("승온 감지 임계값 (°C)", value=5, step=1, help="저온 후 승온 시작으로 간주할 최소 온도 상승량 (예: 5분 동안 5°C 상승)")
+            time_window_minutes = st.number_input("승온 감지 시간 (분)", value=5, min_value=1, step=1, help="승온 감지 임계값 적용 시간 (분 단위)")
             
         # 장입 및 저온 체크 통합 (간소화)
         st.divider()
@@ -579,7 +583,7 @@ def main():
                 res, raw, error_msg = process_data(prod_files, p_header, # p_header 인수를 명시적으로 전달
                                                    col_p_start_time, col_p_weight, col_p_unit, 
                                                    s_header, col_s_time, col_s_temp, col_s_gas, 
-                                                   target_cost, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_strict_start, use_target_cost, time_tolerance_hours)
+                                                   target_cost, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_strict_start, use_target_cost, time_tolerance_hours, temp_rise_threshold, time_window_minutes)
                 
                 if error_msg:
                      st.error(f"분석 실패: {error_msg}")
