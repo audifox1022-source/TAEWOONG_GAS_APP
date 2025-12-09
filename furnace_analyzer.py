@@ -77,6 +77,7 @@ def analyze_cycle(daily_data, temp_start, temp_holding_min, temp_holding_max, du
     # 1. 시작점 찾기 
     
     start_row = None
+    duration_min_td = timedelta(hours=duration_holding_min)
     
     if check_strict_start:
         # **장입 후 승온 로직:** temp_start 이하로 떨어진 후 다시 급격히 승온되는 지점을 시작점으로 간주
@@ -91,7 +92,7 @@ def analyze_cycle(daily_data, temp_start, temp_holding_min, temp_holding_max, du
             window = daily_data.loc[idx:idx + 10]
             if len(window) < 5: continue
             
-            # 5분 동안 5도 이상 상승하는 지점을 승온 시작으로 간주
+            # 5분 동안 5도 이상 상승하는 지점을 승온 시작으로 간주 (오류 수정: window['온도가'] -> window['온도'])
             if (window['온도'].iloc[-1] - window['온도'].iloc[0]) >= 5: 
                 # 시작 온도는 소재 장입이 완료된 후 온도가 상승하기 시작하는 시점
                 start_row = daily_data.loc[idx]
@@ -121,7 +122,6 @@ def analyze_cycle(daily_data, temp_start, temp_holding_min, temp_holding_max, du
     holding_end_time = None
     
     # 각 그룹별 지속시간 체크
-    duration_min_td = timedelta(hours=duration_holding_min)
     for _, group in post_start_data[post_start_data['is_holding']].groupby('group'):
         # 연속된 홀딩 기간의 시작과 끝
         if not group.empty:
@@ -274,7 +274,7 @@ def process_data(sensor_files, df_prod, col_p_start_time, col_p_weight, col_p_un
             temp_data = daily_window.copy()
             
             # 사이클 분석 수행 (첫 번째 유효 사이클만 찾음)
-            cycle_info, msg = analyze_cycle(temp_data, temp_start, temp_holding_min, temp_holding_max, duration_min_td, temp_end, check_strict_start) # check_charging_end와 check_abnormal_low를 check_strict_start 하나로 통합
+            cycle_info, msg = analyze_cycle(temp_data, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_strict_start)
             
             if not cycle_info:
                 continue # 유효 사이클 없음
@@ -543,14 +543,16 @@ def main():
                 st.dataframe(df_s)
                 
                 # 키워드 기반 기본 인덱스 설정
+                # '가스누적지침'을 최우선으로 탐색
                 col_s_time_index = get_default_index(df_s.columns, ['일시', '시간', 'time'])
                 col_s_temp_index = get_default_index(df_s.columns, ['온도', 'temp', '℃'])
-                col_s_gas_index = get_default_index(df_s.columns, ['가스', '지침', 'gas', '누적지침'])
+                col_s_gas_index = get_default_index(df_s.columns, ['가스누적지침', '가스', '지침', 'gas']) # '가스누적지침' 최우선
+
                 
                 # 사용자가 원하는 컬럼 이름 직접 선택
                 col_s_time = st.selectbox("⏰ 일시 컬럼", df_s.columns, index=col_s_time_index, key="s_time")
                 col_s_temp = st.selectbox("🔥 온도 컬럼", df_s.columns, index=col_s_temp_index, key="s_temp")
-                col_s_gas = st.selectbox("⛽ 가스지침 컬럼", df_s.columns, index=col_s_gas_index, key="s_gas")
+                col_s_gas = st.selectbox("⛽ 가스지침 컬럼 (누적값)", df_s.columns, index=col_s_gas_index, key="s_gas")
                 
         except Exception as e:
             st.error(f"데이터 미리보기에 실패했습니다. 제목행 설정을 확인하거나 파일 형식을 점검해주세요. (세부 오류: {e})")
