@@ -92,7 +92,7 @@ def analyze_cycle(daily_data, temp_start, temp_holding_min, temp_holding_max, du
             if len(window) < 5: continue
             
             # 5분 동안 5도 이상 상승하는 지점을 승온 시작으로 간주
-            if (window['온도'].iloc[-1] - window['온도가'].iloc[0]) >= 5:
+            if (window['온도'].iloc[-1] - window['온도'].iloc[0]) >= 5: # [이전 오류 수정: window['온도가'] -> window['온도']]
                 # 시작 온도는 소재 장입이 완료된 후 온도가 상승하기 시작하는 시점
                 start_row = daily_data.loc[idx]
                 break
@@ -274,7 +274,7 @@ def process_data(sensor_files, df_prod, col_p_start_time, col_p_weight, col_p_un
             temp_data = daily_window.copy()
             
             # 사이클 분석 수행 (첫 번째 유효 사이클만 찾음)
-            cycle_info, msg = analyze_cycle(temp_data, temp_start, temp_holding_min, temp_holding_max, duration_min_td, temp_end, check_strict_start, check_strict_start) # check_charging_end와 check_abnormal_low를 check_strict_start 하나로 통합
+            cycle_info, msg = analyze_cycle(temp_data, temp_start, temp_holding_min, temp_holding_max, duration_min_td, temp_end, check_strict_start) # check_charging_end와 check_abnormal_low를 check_strict_start 하나로 통합
             
             if not cycle_info:
                 continue # 유효 사이클 없음
@@ -612,49 +612,85 @@ def main():
                 avg_unit = df_filtered['원단위'].mean()
                 
                 col_s1, col_s2, col_s3 = st.columns(3)
-                if use_target_cost:
-                    pass_count = (df_filtered['달성여부'] == 'Pass').sum()
-                    fail_count = (df_filtered['달성여부'] == 'Fail').sum()
-                    with col_s1: st.metric("평균 원단위", f"{avg_unit:.2f} Nm3/ton", f"{avg_unit - target_cost:.2f}", delta_color="inverse")
-                    with col_s2: st.metric("Pass 건수", f"{pass_count} 건")
-                    with col_s3: st.metric("Fail 건수", f"{fail_count} 건")
-                else:
-                    with col_s1: st.metric("평균 원단위", f"{avg_unit:.2f} Nm3/ton")
-                    with col_s2: st.metric("총 사이클", f"{len(df_filtered)} 건")
-                    with col_s3: st.write("")
+                if selected_unit == '전체':
+                    # 모든 가열로 비교 통계
+                    df_summary = df.groupby('가열로').agg(
+                        총사이클=('원단위', 'size'),
+                        평균원단위=('원단위', 'mean'),
+                        총장입량=('장입량(kg)', 'sum'),
+                        총가스사용량=('가스사용량(Nm3)', 'sum')
+                    ).reset_index()
+                    
+                    df_summary['평균원단위'] = df_summary['평균원단위'].round(2)
+                    
+                    st.subheader("🔥 가열로별 평균 원단위 비교")
+                    
+                    # Bar Chart
+                    fig_bar, ax_bar = plt.subplots(figsize=(10, 5))
+                    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd'] # 대표 색상
+                    num_units = len(df_summary)
+                    
+                    bars = ax_bar.bar(df_summary['가열로'], df_summary['평균원단위'], color=colors[:num_units])
+                    ax_bar.set_title('가열로별 평균 원단위 (Nm3/ton)')
+                    ax_bar.set_ylabel('평균 원단위')
+                    ax_bar.tick_params(axis='x', rotation=45)
+                    
+                    if use_target_cost and target_cost is not None:
+                        ax_bar.axhline(target_cost, color='r', linestyle='--', linewidth=2, label=f'목표 ({target_cost:.2f})')
+                        ax_bar.legend()
+                        
+                    st.pyplot(fig_bar)
+                    plt.close(fig_bar)
+                    
+                    st.subheader("종합 요약 테이블")
+                    st.dataframe(df_summary, use_container_width=True)
 
-                # 1. 히스토그램 (분포)
-                fig_hist, ax_hist = plt.subplots(figsize=(10, 5))
-                df_filtered['원단위'].hist(ax=ax_hist, bins=15, edgecolor='black', alpha=0.7)
-                
-                if use_target_cost:
-                    ax_hist.axvline(target_cost, color='r', linestyle='--', linewidth=2, label=f'목표 ({target_cost:.2f})')
-                
-                ax_hist.axvline(avg_unit, color='g', linestyle='-', linewidth=2, label=f'평균 ({avg_unit:.2f})')
-                ax_hist.set_title(f'[{selected_unit}] 원단위 분포 히스토그램')
-                ax_hist.set_xlabel('원단위 (Nm3/ton)')
-                ax_hist.set_ylabel('사이클 수')
-                ax_hist.legend()
-                st.pyplot(fig_hist)
-                plt.close(fig_hist) # 메모리 해제
-                
-                # 2. 시계열 차트 (추세)
-                df_trend = df_filtered.copy()
-                df_trend['날짜'] = pd.to_datetime(df_trend['날짜'])
-                
-                fig_trend, ax_trend = plt.subplots(figsize=(10, 5))
-                ax_trend.plot(df_trend['날짜'], df_trend['원단위'], marker='o', linestyle='-', color='b', label='실적 원단위')
-                
-                if use_target_cost:
-                    ax_trend.axhline(target_cost, color='r', linestyle='--', linewidth=2, label=f'목표 ({target_cost:.2f})')
-                
-                ax_trend.set_title(f'[{selected_unit}] 원단위 시계열 추이')
-                ax_trend.set_xlabel('날짜')
-                ax_trend.set_ylabel('원단위 (Nm3/ton)')
-                ax_trend.legend()
-                ax_trend.grid(True, linestyle=':', alpha=0.6)
-                st.pyplot(fig_trend)
-                plt.close(fig_trend) # 메모리 해제
+
+                else:
+                    # 개별 가열로 통계 (기존 로직 유지)
+                    if use_target_cost:
+                        pass_count = (df_filtered['달성여부'] == 'Pass').sum()
+                        fail_count = (df_filtered['달성여부'] == 'Fail').sum()
+                        with col_s1: st.metric("평균 원단위", f"{avg_unit:.2f} Nm3/ton", f"{avg_unit - target_cost:.2f}", delta_color="inverse")
+                        with col_s2: st.metric("Pass 건수", f"{pass_count} 건")
+                        with col_s3: st.metric("Fail 건수", f"{fail_count} 건")
+                    else:
+                        with col_s1: st.metric("평균 원단위", f"{avg_unit:.2f} Nm3/ton")
+                        with col_s2: st.metric("총 사이클", f"{len(df_filtered)} 건")
+                        with col_s3: st.write("")
+
+                    # 1. 히스토그램 (분포)
+                    fig_hist, ax_hist = plt.subplots(figsize=(10, 5))
+                    df_filtered['원단위'].hist(ax=ax_hist, bins=15, edgecolor='black', alpha=0.7)
+                    
+                    if use_target_cost:
+                        ax_hist.axvline(target_cost, color='r', linestyle='--', linewidth=2, label=f'목표 ({target_cost:.2f})')
+                    
+                    ax_hist.axvline(avg_unit, color='g', linestyle='-', linewidth=2, label=f'평균 ({avg_unit:.2f})')
+                    ax_hist.set_title(f'[{selected_unit}] 원단위 분포 히스토그램')
+                    ax_hist.set_xlabel('원단위 (Nm3/ton)')
+                    ax_hist.set_ylabel('사이클 수')
+                    ax_hist.legend()
+                    st.pyplot(fig_hist)
+                    plt.close(fig_hist) # 메모리 해제
+                    
+                    # 2. 시계열 차트 (추세)
+                    fig_trend, ax_trend = plt.subplots(figsize=(10, 5))
+                    df_trend = df_filtered.copy()
+                    df_trend['날짜'] = pd.to_datetime(df_trend['날짜'])
+
+                    ax_trend.plot(df_trend['날짜'], df_trend['원단위'], marker='o', linestyle='-', color='b', label='실적 원단위')
+                    
+                    if use_target_cost:
+                        ax_trend.axhline(target_cost, color='r', linestyle='--', linewidth=2, label=f'목표 ({target_cost:.2f})')
+                    
+                    ax_trend.set_title(f'[{selected_unit}] 원단위 시계열 추이')
+                    ax_trend.set_xlabel('날짜')
+                    ax_trend.set_ylabel('원단위 (Nm3/ton)')
+                    ax_trend.legend()
+                    ax_trend.grid(True, linestyle=':', alpha=0.6)
+                    st.pyplot(fig_trend)
+                    plt.close(fig_trend) # 메모리 해제
             else:
                  st.warning("분석할 유효 데이터가 없습니다.")
 
