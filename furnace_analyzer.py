@@ -131,7 +131,7 @@ def analyze_cycle(daily_data, temp_start, temp_holding_min, temp_holding_max, du
                 break # 첫 번째 유효 홀딩 구간을 찾으면 중단
             
     if holding_end_time is None:
-        return None, f"유효 홀딩 구간({duration_holding_min}시간 이상) 없음"
+        return None, f"유효 홀딩 구간({duration_min_td} 이상) 없음" # duration_min_td 문자열로 표시
 
     # 3. 종료점 찾기
     post_holding_data = daily_data[daily_data['일시'] > holding_end_time]
@@ -251,111 +251,79 @@ def process_data(sensor_files, df_prod, col_p_start_time, col_p_weight, col_p_un
         
         if df_prod_unit.empty: continue # 생산 실적이 없는 가열로는 분석 제외
 
-        # 센서 데이터 전체 기간을 2일 간격으로 순회하며 사이클 분석 시도
-        # 센서 데이터의 시작과 끝 시간을 기준으로 48시간 윈도우 생성
-        time_points = pd.date_range(start=df_sensor_unit['일시'].min().normalize(), 
-                                    end=df_sensor_unit['일시'].max().normalize() + timedelta(days=2), 
-                                    freq='D')
+        # 매칭된 생산 실적 행을 저장하여 중복 사용 방지
+        processed_prod_indices = set()
         
-        # 이미 처리된 시작 시간을 기록하여 중복 감지 방지 (센서 데이터 기준)
-        processed_start_times = set()
-
-        for date_ts in time_points:
+        # 2. 생산 실적 (차지별) 반복
+        # 생산 실적의 모든 행(차지)을 기준으로 센서 데이터에서 유효 사이클을 찾습니다.
+        for index, prod_row in df_prod_unit.iterrows():
             
-            # 48시간 윈도우 데이터 (시작 600도 이하를 놓치지 않기 위해 넉넉한 윈도우)
+            prod_start_time = prod_row['시작일시']
+            
+            # 생산 실적 시작 시간 주변의 48시간 윈도우 (센서 데이터)
+            window_start = prod_start_time - timedelta(hours=time_tolerance_hours)
+            window_end = prod_start_time + timedelta(hours=48) # 충분히 긴 탐색 시간 (홀딩 시간 고려)
+            
             daily_window = df_sensor_unit[
-                (df_sensor_unit['일시'] >= date_ts - timedelta(hours=1)) & 
-                (df_sensor_unit['일시'] < date_ts + timedelta(days=2)) 
+                (df_sensor_unit['일시'] >= window_start) & 
+                (df_sensor_unit['일시'] < window_end) 
             ].copy()
             
             if daily_window.empty: continue
             
-            # --- 반복적인 사이클 분석 시도 ---
+            # --- 해당 윈도우 내에서 가장 가까운 유효 사이클 찾기 ---
             
             temp_data = daily_window.copy()
             
-            while True:
-                # 사이클 분석 수행: check_abnormal_low, check_charging_end 전달
-                cycle_info, msg = analyze_cycle(temp_data, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_abnormal_low, check_charging_end)
-                
-                if not cycle_info:
-                    break # 더 이상 유효한 사이클이 없으면 종료
-
-                start = cycle_info['start_row']
-                end = cycle_info['end_row']
-                start_time_of_cycle = start['일시']
-                
-                # 중복 사이클 감지 방지 (이미 처리된 시간 근처의 사이클이면 건너뜀)
-                if start_time_of_cycle in processed_start_times:
-                    # 이미 처리된 사이클의 뒷부분부터 다시 탐색하도록 데이터 윈도우 조정
-                    next_start_index = temp_data[temp_data['일시'] > end['일시']].index.min()
-                    if pd.isna(next_start_index):
-                        break
-                    temp_data = temp_data.loc[next_start_index:].copy()
-                    continue
-
-                # 2. 생산 실적 매칭 (시작일시 기반 최근접 매칭)
-                
-                # 센서 사이클 시작 시간과 가장 가까운 생산 실적 행을 찾기
-                prod_data_for_match = df_prod_unit.copy()
-                
-                # 시작일시와 센서 사이클 시작 시간의 차이 (절대값) 계산
-                prod_data_for_match['diff'] = abs(prod_data_for_match['시작일시'] - start_time_of_cycle)
-                
-                # 차이가 가장 작은 (가장 가까운) 행을 찾음
-                closest_match = prod_data_for_match.loc[prod_data_for_match['diff'].idxmin()]
-                
-                # 매칭 기준: 매칭된 생산 실적의 시작 시점이 센서 사이클의 시작 시점과 time_tolerance_hours 이내여야 함
-                if closest_match['diff'] > timedelta(hours=time_tolerance_hours):
-                    # 매칭 실패 (너무 동떨어진 차지)
-                    match_success = False
-                    charge_kg = 0 # 장입량 0으로 설정하여 원단위 계산 제외
-                else:
-                    match_success = True
-                    prod_row = closest_match
-                    charge_kg = prod_row['장입량']
-                
-                
-                # 3. 원단위 및 결과 계산
-                
-                if charge_kg <= 0:
-                    # 장입량이 없거나 매칭 실패로 0일 경우, 다음 사이클 탐색으로 이동
-                    pass
-                else:
-                    gas_used = end['가스지침'] - start['가스지침']
-                    if gas_used <= 0:
-                         pass
-                    else:
-                        unit = gas_used / (charge_kg / 1000) # Nm3 / ton
-                        
-                        # 목표 원단위 사용 여부에 따라 달성 여부 설정
-                        if use_target_cost:
-                            is_pass = unit <= target_cost
-                            achievement = 'Pass' if is_pass else 'Fail'
-                        else:
-                            achievement = 'N/A' # 목표 원단위를 사용하지 않을 경우
-                        
-                        results.append({
-                            '가열로': unit_id,
-                            '날짜': start_time_of_cycle.strftime('%Y-%m-%d'),
-                            '검침시작': start_time_of_cycle.strftime('%Y-%m-%d %H:%M'),
-                            '시작지침': start['가스지침'],
-                            '검침완료': end['일시'].strftime('%Y-%m-%d %H:%M'),
-                            '종료지침': end['가스지침'],
-                            '가스사용량(Nm3)': int(gas_used),
-                            '장입량(kg)': int(charge_kg),
-                            '원단위': round(unit, 2),
-                            '달성여부': achievement,
-                            '비고': f"홀딩종료: {cycle_info['holding_end'].strftime('%H:%M')}"
-                        })
-
-                # 다음 사이클 탐색을 위해 현재 사이클이 종료된 시간 이후의 데이터만 남김
-                processed_start_times.add(start_time_of_cycle)
-                next_start_index = temp_data[temp_data['일시'] > end['일si']].index.min()
-                if pd.isna(next_start_index):
-                    break
-                temp_data = temp_data.loc[next_start_index:].copy()
+            # 사이클 분석 수행 (첫 번째 유효 사이클만 찾음)
+            cycle_info, msg = analyze_cycle(temp_data, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_abnormal_low, check_charging_end)
             
+            if not cycle_info:
+                continue # 유효 사이클 없음
+            
+            start = cycle_info['start_row']
+            end = cycle_info['end_row']
+            start_time_of_cycle = start['일시']
+
+            # 매칭 검증: 센서 사이클 시작 시간과 생산 실적 시작 시간의 차이 확인
+            match_diff = abs(prod_start_time - start_time_of_cycle)
+            
+            if match_diff > timedelta(hours=time_tolerance_hours):
+                # 매칭 실패 (허용 범위 초과)
+                continue
+            
+            # 3. 원단위 및 결과 계산
+            
+            charge_kg = prod_row['장입량']
+            
+            if charge_kg <= 0: continue
+            
+            gas_used = end['가스지침'] - start['가스지침']
+            if gas_used <= 0: continue
+            
+            unit = gas_used / (charge_kg / 1000) # Nm3 / ton
+            
+            # 목표 원단위 사용 여부에 따라 달성 여부 설정
+            if use_target_cost:
+                is_pass = unit <= target_cost
+                achievement = 'Pass' if is_pass else 'Fail'
+            else:
+                achievement = 'N/A' # 목표 원단위를 사용하지 않을 경우
+            
+            results.append({
+                '가열로': unit_id,
+                '날짜': start_time_of_cycle.strftime('%Y-%m-%d'),
+                '검침시작': start_time_of_cycle.strftime('%Y-%m-%d %H:%M'),
+                '시작지침': start['가스지침'],
+                '검침완료': end['일시'].strftime('%Y-%m-%d %H:%M'),
+                '종료지침': end['가스지침'],
+                '가스사용량(Nm3)': int(gas_used),
+                '장입량(kg)': int(charge_kg),
+                '원단위': round(unit, 2),
+                '달성여부': achievement,
+                '비고': f"홀딩종료: {cycle_info['holding_end'].strftime('%H:%M')}"
+            })
+
     # 전체 센서 데이터 반환 (필터링되지 않은 원본)
     return pd.DataFrame(results), df_sensor, None
 
