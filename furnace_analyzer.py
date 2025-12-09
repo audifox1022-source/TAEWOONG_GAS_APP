@@ -251,9 +251,6 @@ def process_data(sensor_files, df_prod, col_p_start_time, col_p_weight, col_p_un
         
         if df_prod_unit.empty: continue # 생산 실적이 없는 가열로는 분석 제외
 
-        # 매칭된 생산 실적 행을 저장하여 중복 사용 방지
-        processed_prod_indices = set()
-        
         # 2. 생산 실적 (차지별) 반복
         # 생산 실적의 모든 행(차지)을 기준으로 센서 데이터에서 유효 사이클을 찾습니다.
         for index, prod_row in df_prod_unit.iterrows():
@@ -261,6 +258,7 @@ def process_data(sensor_files, df_prod, col_p_start_time, col_p_weight, col_p_un
             prod_start_time = prod_row['시작일시']
             
             # 생산 실적 시작 시간 주변의 48시간 윈도우 (센서 데이터)
+            # 센서 사이클 시작은 생산 실적 시작보다 앞서거나 뒤쳐질 수 있으므로, 매칭 허용 시간만큼 앞뒤로 윈도우 설정
             window_start = prod_start_time - timedelta(hours=time_tolerance_hours)
             window_end = prod_start_time + timedelta(hours=48) # 충분히 긴 탐색 시간 (홀딩 시간 고려)
             
@@ -276,7 +274,7 @@ def process_data(sensor_files, df_prod, col_p_start_time, col_p_weight, col_p_un
             temp_data = daily_window.copy()
             
             # 사이클 분석 수행 (첫 번째 유효 사이클만 찾음)
-            cycle_info, msg = analyze_cycle(temp_data, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end, check_abnormal_low, check_charging_end)
+            cycle_info, msg = analyze_cycle(temp_data, temp_start, temp_holding_min, temp_holding_max, duration_min_td, temp_end, check_abnormal_low, check_charging_end)
             
             if not cycle_info:
                 continue # 유효 사이클 없음
