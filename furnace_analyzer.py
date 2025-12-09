@@ -7,6 +7,7 @@ import tempfile
 import os
 from datetime import timedelta
 import numpy as np
+import re # 파일 이름 파싱을 위해 re 모듈 추가
 
 # ---------------------------------------------------------
 # 1. 앱 설정 및 폰트
@@ -135,8 +136,19 @@ def analyze_cycle(daily_data, temp_start, temp_holding_min, temp_holding_max, du
         'holding_end': holding_end_time
     }, "성공"
 
+# 파일 이름에서 가열로 ID를 추출하는 헬퍼 함수
+def extract_furnace_id_from_filename(filename):
+    """파일 이름에서 '가열로X호기' 또는 '가열로X' 패턴을 찾아 ID를 추출합니다."""
+    # '가열로'로 시작하고 '호기'로 끝나는 패턴 또는 '가열로X' 패턴을 찾습니다.
+    # 예: 가열로 1호기_data.csv -> 가열로1호기
+    match = re.search(r'(가열로\s*\d+\s*호기|가열로\s*\d+)', filename, re.IGNORECASE)
+    if match:
+        # 찾은 문자열에서 공백을 제거하고 반환
+        return match.group(0).strip().replace(' ', '')
+    return None
+
 def process_data(sensor_files, df_prod, col_p_date, col_p_weight, col_p_unit, 
-                 s_header_row, col_s_time, col_s_temp, col_s_gas, col_s_unit, 
+                 s_header_row, col_s_time, col_s_temp, col_s_gas, # col_s_unit 제거됨
                  target_cost, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end):
     
     # --- 생산실적 데이터 전처리 ---
@@ -155,25 +167,44 @@ def process_data(sensor_files, df_prod, col_p_date, col_p_weight, col_p_unit,
     for f in sensor_files:
         f.seek(0) # 파일 포인터 초기화
         df = smart_read_file(f, s_header_row)
-        if df is not None: df_list.append(df)
-    
+        
+        if df is not None:
+            
+            # 1. 파일 이름에서 가열로 ID 추출
+            unit_id = extract_furnace_id_from_filename(f.name)
+            if not unit_id:
+                st.warning(f"경고: 센서 파일 {f.name}에서 유효한 가열로 ID를 찾을 수 없습니다. (패턴: 가열로X호기 또는 가열로X). 이 파일은 분석에서 제외됩니다.")
+                continue
+
+            try:
+                # 2. 컬럼 이름 정규화
+                df.columns = [str(c).strip() for c in df.columns]
+
+                # 3. 컬럼 매핑
+                df = df.rename(columns={col_s_time: '일시', col_s_temp: '온도', col_s_gas: '가스지침'})
+
+                # 4. 가열로 ID 컬럼 추가
+                df['가열로'] = unit_id
+
+                # 5. 타입 변환 및 정리
+                df['일시'] = pd.to_datetime(df['일시'], errors='coerce')
+                df['온도'] = pd.to_numeric(df['온도'], errors='coerce')
+                df['가스지침'] = pd.to_numeric(df['가스지침'], errors='coerce')
+                
+                # 시간 컬럼 기준으로 정렬하고 NaN 제거
+                df = df.dropna(subset=['일시', '가열로']).sort_values('일시')
+                
+                # 중복 일시 제거 (가장 마지막 값 유지)
+                df = df.drop_duplicates(subset=['일시', '가열로'], keep='last').reset_index(drop=True)
+                
+                df_list.append(df)
+            except Exception as e:
+                st.error(f"센서 데이터 매핑 오류 (파일: {f.name}): {e}")
+                
     if not df_list: return None, None, "센서 데이터 없음"
     
     df_sensor = pd.concat(df_list, ignore_index=True)
-    df_sensor.columns = [str(c).strip() for c in df_sensor.columns]
     
-    try:
-        # 가열로 컬럼 추가
-        df_sensor = df_sensor.rename(columns={col_s_time: '일시', col_s_temp: '온도', col_s_gas: '가스지침', col_s_unit: '가열로'})
-        df_sensor['일시'] = pd.to_datetime(df_sensor['일시'], errors='coerce')
-        df_sensor['온도'] = pd.to_numeric(df_sensor['온도'], errors='coerce')
-        df_sensor['가스지침'] = pd.to_numeric(df_sensor['가스지침'], errors='coerce')
-        # 시간 컬럼 기준으로 정렬하고 NaN 제거
-        df_sensor = df_sensor.dropna(subset=['일시', '가열로']).sort_values('일시')
-        # 중복 일시 제거 (가장 마지막 값 유지)
-        df_sensor = df_sensor.drop_duplicates(subset=['일시', '가열로'], keep='last').reset_index(drop=True)
-    except Exception as e: return None, None, f"센서 데이터 매핑 오류: {e}"
-
     # --- 다중 가열로 분석 실행 ---
     unit_ids = df_sensor['가열로'].unique()
     
@@ -364,10 +395,10 @@ def main():
     
     with st.sidebar:
         st.header("1. 데이터 업로드")
-        # 가열로 이름 입력 필드 제거 (자동 감지)
         
-        prod_file = st.file_uploader("생산 실적 (Excel) - 가열로 ID 포함 필수", type=['xlsx'])
-        sensor_files = st.file_uploader("가열로 데이터 (CSV/Excel) - 가열로 ID 포함 필수", type=['csv', 'xlsx', 'xls'], accept_multiple_files=True)
+        prod_file = st.file_uploader("생산 실적 (Excel) - 가열로 ID 컬럼 필수", type=['xlsx'])
+        st.info("센서 데이터는 파일 이름에서 가열로 ID를 자동으로 인식합니다. (예: 가열로1호기_data.csv)")
+        sensor_files = st.file_uploader("가열로 데이터 (CSV/Excel) - 파일 이름에서 ID 인식", type=['csv', 'xlsx', 'xls'], accept_multiple_files=True)
         
         st.divider()
         st.header("2. 분석 기준 설정")
@@ -423,36 +454,36 @@ def main():
                 # 사용자가 원하는 컬럼 이름 직접 선택
                 col_p_date = st.selectbox("📅 날짜 컬럼", df_p.columns, index=col_p_date_index, key="p_date")
                 col_p_weight = st.selectbox("⚖️ 장입량 컬럼", df_p.columns, index=col_p_weight_index, key="p_weight")
-                col_p_unit = st.selectbox("🏭 가열로 ID 컬럼", df_p.columns, index=col_p_unit_index, key="p_unit")
+                col_p_unit = st.selectbox("🏭 생산 실적의 가열로 ID 컬럼", df_p.columns, index=col_p_unit_index, key="p_unit")
                 
             with c2:
-                st.caption("가열로 센서 데이터")
+                st.caption("가열로 센서 데이터 (가열로 ID는 파일 이름에서 추출)")
                 st.dataframe(df_s)
                 
                 # 키워드 기반 기본 인덱스 설정
                 col_s_time_index = get_default_index(df_s.columns, ['일시', '시간', 'time'])
                 col_s_temp_index = get_default_index(df_s.columns, ['온도', 'temp'])
                 col_s_gas_index = get_default_index(df_s.columns, ['가스', '지침', 'gas'])
-                col_s_unit_index = get_default_index(df_s.columns, ['가열로', '호기', 'unit', 'furnace'])
                 
                 # 사용자가 원하는 컬럼 이름 직접 선택
                 col_s_time = st.selectbox("⏰ 일시 컬럼", df_s.columns, index=col_s_time_index, key="s_time")
                 col_s_temp = st.selectbox("🔥 온도 컬럼", df_s.columns, index=col_s_temp_index, key="s_temp")
                 col_s_gas = st.selectbox("⛽ 가스지침 컬럼", df_s.columns, index=col_s_gas_index, key="s_gas")
-                col_s_unit = st.selectbox("🏭 가열로 ID 컬럼", df_s.columns, index=col_s_unit_index, key="s_unit")
+                # col_s_unit 제거됨
                 
         except Exception as e:
             st.error(f"데이터 미리보기에 실패했습니다. 제목행 설정을 확인하거나 파일 형식을 점검해주세요. (세부 오류: {e})")
-            col_p_date, col_p_weight, col_p_unit, col_s_time, col_s_temp, col_s_gas, col_s_unit = None, None, None, None, None, None, None
+            col_p_date, col_p_weight, col_p_unit, col_s_time, col_s_temp, col_s_gas = None, None, None, None, None, None
 
         if run_btn and col_p_date: # 컬럼 선택이 완료되었을 때 실행
             with st.spinner("정밀 분석 중... (사이클 탐색 및 원단위 계산)"):
                 # 전체 데이터 다시 읽기
                 f_prod_full = smart_read_file(prod_file, p_header)
                 
+                # process_data 호출 시 col_s_unit 인자 제거
                 res, raw, error_msg = process_data(sensor_files, f_prod_full, 
                                                    col_p_date, col_p_weight, col_p_unit, 
-                                                   s_header, col_s_time, col_s_temp, col_s_gas, col_s_unit,
+                                                   s_header, col_s_time, col_s_temp, col_s_gas, 
                                                    target_cost, temp_start, temp_holding_min, temp_holding_max, duration_holding_min, temp_end)
                 
                 if error_msg:
